@@ -1,25 +1,20 @@
-import logging
 import asyncio
-import requests
+import logging
 import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import requests
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-# ==================== CONFIGURATION ====================
-TELEGRAM_BOT_TOKEN = "8742169602:AAGg8N1RkGMfwUgx1Dg9cSVz1qRqRaIO1NU"
+# تكوين السجل
+logging.basicConfig(level=logging.INFO)
 
+# بيانات البوت والثوابت
+BOT_TOKEN = "8742169602:AAGg8N1RkGMfwUgx1Dg9cSVz1qRqRaIO1NU"
 API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zcWFoZnJ5d3p4ZXd1d3ZhaXpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzNTQ3ODgsImV4cCI6MjA5OTkzMDc4OH0.xqLJB4nDxvK4m7O2VoObIlXwwxwzsWtSZDV0cIq-Q8E"
-
-# تخزين الحسابات (يدعم تسمية الحساب والـ init_data الخاص به)
-# الشكل: { user_id: { "acc_1": {"name": "مادارا كريبتو", "init_data": "...", "active": False} } }
-USER_ACCOUNTS = {}
-
-# حالات محادثة إضافة حساب جديد
-GET_NAME, GET_INIT_DATA = range(2)
-
-SUCCESS_DELAY = 15
-AD_TYPES = ["usl_ad", "gigapub", "taddy", "monetag", "sponsored"]
-
 BASE_URL = "https://osqahfrywzxewuwvaizc.supabase.co"
 AUTH_URL = f"{BASE_URL}/functions/v1/tg-auth"
 TOKEN_URL = f"{BASE_URL}/auth/v1/token?grant_type=password"
@@ -27,340 +22,266 @@ AD_WATCH_URL = f"{BASE_URL}/functions/v1/record-ad-watch"
 SESSION_URL = f"{BASE_URL}/rest/v1/rpc/upsert_user_session"
 BALANCE_URL = f"{BASE_URL}/rest/v1/rpc/get_verified_balance"
 PROFILES_URL = f"{BASE_URL}/rest/v1/profiles"
+AD_TYPES = ["usl_ad", "gigapub", "taddy", "monetag", "sponsored"]
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# تخزين بيانات الحسابات الثلاثة في الذاكرة (يمكن ربطه بقاعدة بيانات لاحقاً)
+ACCOUNTS = {
+    "account_1": {
+        "name": "الحساب الأول",
+        "init_data": "",
+        "active": False,
+        "task": None,
+    },
+    "account_2": {
+        "name": "الحساب الثاني",
+        "init_data": "",
+        "active": False,
+        "task": None,
+    },
+    "account_3": {
+        "name": "الحساب الثالث",
+        "init_data": "",
+        "active": False,
+        "task": None,
+    },
+}
 
-# ==================== API FUNCTIONS ====================
+# حالات FSM لتحديث الـ init_data
+class Form(StatesGroup):
+    waiting_for_init_data = State()
+    target_account = State()
+
+router = Router()
+
+# دالة المصادقة وجلب الرصيد ومعلومات الحساب
 def authenticate_and_get_details(init_data):
     headers = {
         "authority": "osqahfrywzxewuwvaizc.supabase.co",
-        "accept": "*/*",
+        "accept": "/",
         "apikey": API_KEY,
         "content-type": "application/json",
         "origin": "https://telegram-mining-app-c5fu.bolt.host",
         "referer": "https://telegram-mining-app-c5fu.bolt.host/",
-        "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+        "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
     }
     try:
         res = requests.post(AUTH_URL, json={"initData": init_data, "check_only": False}, headers=headers, timeout=15)
         if res.status_code != 200:
-            return None, None
-            
+            return None, None, None
+
         data = res.json()
         email = data.get("email")
         password = data.get("password")
         if not email or not password:
-            return None, None
-            
+            return None, None, None
+
         token_payload = {"email": email, "password": password, "gotrue_meta_security": {}}
         token_headers = {**headers, "authorization": f"Bearer {API_KEY}", "x-supabase-api-version": "2024-01-01"}
-        
+
         res_token = requests.post(TOKEN_URL, json=token_payload, headers=token_headers, timeout=15)
         if res_token.status_code != 200:
-            return None, None
-            
+            return None, None, None
+
         token_data = res_token.json()
         access_token = token_data.get("access_token")
         if not access_token:
-            return None, None
-            
+            return None, None, None
+
         profile_headers = {
             **headers,
             "authorization": f"Bearer {access_token}",
             "accept": "application/json",
-            "accept-profile": "public"
+            "accept-profile": "public",
         }
         res_profile = requests.get(f"{PROFILES_URL}?select=user_id", headers=profile_headers, timeout=10)
         if res_profile.status_code == 200:
             profiles = res_profile.json()
             if profiles and isinstance(profiles, list) and "user_id" in profiles[0]:
                 user_uuid = profiles[0]["user_id"]
-                return access_token, user_uuid
-                
+                return access_token, user_uuid, headers
     except Exception as e:
-        logging.error(f"Connection Error: {e}")
-        
-    return None, None
+        logging.error(f"Auth error: {e}")
+    return None, None, None
 
-def get_headers(token):
-    return {
-        "authority": "osqahfrywzxewuwvaizc.supabase.co",
-        "accept": "*/*",
-        "accept-language": "en-US,en;q=0.9",
-        "apikey": API_KEY,
-        "authorization": f"Bearer {token}",
-        "content-type": "application/json",
-        "origin": "https://telegram-mining-app-c5fu.bolt.host",
-        "referer": "https://telegram-mining-app-c5fu.bolt.host/",
-        "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-        "x-client-info": "supabase-js-web/2.57.4"
-    }
-
-def get_balance(token):
+def get_balance(token, headers):
     try:
-        res = requests.post(BALANCE_URL, json={}, headers={**get_headers(token), "content-profile": "public"}, timeout=10)
+        res = requests.post(BALANCE_URL, json={}, headers={**headers, "authorization": f"Bearer {token}", "content-profile": "public"}, timeout=10)
         if res.status_code == 200:
             return res.text
-    except Exception as e:
-        logging.error(f"Error fetching balance: {e}")
-    return "N/A"
-
-def update_session(token, user_uuid):
-    try:
-        requests.post(SESSION_URL, json={"p_user_id": user_uuid}, headers={**get_headers(token), "content-profile": "public"}, timeout=10)
     except:
         pass
+    return "غير معروف"
 
-# ==================== WORKERS ====================
-async def worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user_id):
-    account = USER_ACCOUNTS.get(user_id, {}).get(acc_key)
-    if not account:
-        return
-
-    payload = {"initData": account["init_data"], "ad_type": ad_type}
-    if ad_type in ["gigapub", "taddy", "monetag", "sponsored"]:
-        payload["interacted"] = True
-
-    count = 1
-    session = requests.Session()
-    session.headers.update(get_headers(token))
-    
-    while account["active"]:
-        try:
-            res = await asyncio.to_thread(session.post, AD_WATCH_URL, json=payload, timeout=15)
-            res_data = None
-            try:
-                res_data = res.json()
-            except:
-                pass
-                
-            if res.status_code in [401, 403]:
-                logging.warning(f"Token expired for account {account['name']} on channel {ad_type.upper()}")
-                break
-                
-            is_daily_limit = False
-            sleep_time = SUCCESS_DELAY
-            
-            if res.status_code in [400, 429] and isinstance(res_data, dict):
-                error_msg = str(res_data.get("error", "")).lower()
-                if any(k in error_msg for k in ["limit", "max", "daily", "exhausted", "already claimed", "not finished yet"]):
-                    is_daily_limit = True
-                elif "cooldown active" in error_msg:
-                    try:
-                        numbers = re.findall(r'\d+', error_msg)
-                        if numbers:
-                            cooldown_val = int(numbers[0])
-                            if cooldown_val > 120:
-                                break
-                            else:
-                                sleep_time = cooldown_val + 2
-                    except:
-                        sleep_time = 15
-
-            if is_daily_limit:
-                account["active"] = False
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🛑 **توقف تلقائي للحساب:**\nانتهت جميع المشاهدات اليومية المتاحة للحساب (`{account['name']}`) وتم إيقافه بنجاح!",
-                    parse_mode="Markdown"
-                )
-                break
-                
-            if res.status_code == 200:
-                await asyncio.to_thread(update_session, token, user_uuid)
-                current_balance = await asyncio.to_thread(get_balance, token)
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"🔔 **إشعار مشاهدة إعلان ناجح!**\n"
-                            f"👤 الحساب: `{account['name']}`\n"
-                            f"🏢 شركة الإعلانات: `{ad_type.upper()}`\n"
-                            f"🎯 الحالة: `نجاح مشاهدة الإعلان ✅`\n"
-                            f"💰 الرصيد الحالي: `{current_balance}`"
-                        ),
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logging.error(f"Failed to send notification: {e}")
-                    
-                sleep_time = SUCCESS_DELAY
-            
-            await asyncio.sleep(sleep_time)
-            count += 1
-            
-        except Exception as e:
-            logging.error(f"Network Exception ({ad_type.upper()}): {e}")
-            await asyncio.sleep(15)
-
-async def start_account_mining(user_id, acc_key, chat_id, context):
-    account = USER_ACCOUNTS.get(user_id, {}).get(acc_key)
-    if not account or not account["init_data"]:
-        return
-
-    token, user_uuid = await asyncio.to_thread(authenticate_and_get_details, account["init_data"])
-    if not token or not user_uuid:
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ فشلت مصادقة الحساب `{account['name']}`! ربما انتهت صلاحية `init_data` (تتجدد كل 24 ساعة).", parse_mode="Markdown")
-        account["active"] = False
-        return
-
-    balance = await asyncio.to_thread(get_balance, token)
-    account["active"] = True
-
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text=f"🚀 **تم بدء التعدين للحساب:** `{account['name']}`\n💰 الرصيد الابتدائي: `{balance}`",
-        parse_mode="Markdown"
-    )
-
-    tasks = [asyncio.create_task(worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user_id)) for ad_type in AD_TYPES]
-    await asyncio.gather(*tasks)
-
-# ==================== PROFESSIONAL KEYBOARDS ====================
+# لوحة التحكم الرئيسية بالأزرار
 def get_main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("➕ إضافة حساب جديد وتسميته", callback_data="add_account")],
-        [InlineKeyboardButton("🟢 بدء التعدين الشامل", callback_data="run_mining"),
-         InlineKeyboardButton("🔴 إيقاف الكل", callback_data="stop_mining")],
-        [InlineKeyboardButton("📋 عرض حساباتي", callback_data="list_accounts"),
-         InlineKeyboardButton("💰 فحص الأرصدة", callback_data="check_balances")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    keyboard = []
+    for acc_id, acc_data in ACCOUNTS.items():
+        status = "يعمل" if acc_data["active"] else "متوقف"
+        keyboard.append([
+            InlineKeyboardButton(text=f"{acc_data['name']} [{status}]", callback_data=f"manage_{acc_id}")
+        ])
+    keyboard.append([InlineKeyboardButton(text="تحديث init_data لحساب", callback_data="set_init_data")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# ==================== HANDLERS ====================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "👑 **لوحة تحكم نظام الإعلانات الآلي والتعدين** 👑\n\n"
-        "أهلاً بك يا أسطورة! يمكنك إضافة عدة حسابات بأسمائها الخاصة وإدارتها بكفاءة.\n"
-        "اختر أحد الخيارات أدناه:"
+def get_account_keyboard(acc_id):
+    acc = ACCOUNTS[acc_id]
+    toggle_text = "إيقاف التعدين" if acc["active"] else "بدء التعدين"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_{acc_id}")],
+        [InlineKeyboardButton(text="الرصيد الحالي", callback_data=f"balance_{acc_id}")],
+        [InlineKeyboardButton(text="تحديث init_data", callback_data=f"update_{acc_id}")],
+        [InlineKeyboardButton(text="العودة للقائمة", callback_data="main_menu")]
+    ])
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        "لوحة إدارة التعدين:\nاختر الحساب المطلوب لإدارته ومتابعة العمليات:",
+        reply_markup=get_main_keyboard()
     )
-    if update.message:
-        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-    elif update.callback_query:
-        await update.callback_query.message.edit_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
-async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("✏️ أرسل الآن **اسم الحساب** الذي تريد تسميته به (مثال: مادارا كريبتو):", parse_mode="Markdown")
-    return GET_NAME
-
-async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['temp_name'] = update.message.text.strip()
-    await update.message.reply_text(
-        "🔑 ممتاز! الآن أرسل **`init_data`** الخاص بهذا الحساب (تذكر أنه يتجدد كل 24 ساعة):\n\n"
-        "قم بلصقه هنا مباشرة:", parse_mode="Markdown"
+@router.callback_query(F.data == "main_menu")
+async def cb_main_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "لوحة إدارة التعدين:\nاختر الحساب المطلوب لإدارته ومتابعة العمليات:",
+        reply_markup=get_main_keyboard()
     )
-    return GET_INIT_DATA
+    await callback.answer()
 
-async def receive_init_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    init_data = update.message.text.strip()
-    acc_name = context.user_data.get('temp_name', 'حساب بدون اسم')
+@router.callback_query(F.data.startswith("manage_"))
+async def cb_manage_account(callback: CallbackQuery):
+    acc_id = callback.data.split("_")[1]
+    acc = ACCOUNTS[acc_id]
+    status = "يعمل" if acc["active"] else "متوقف"
+    text = f"إدارة {acc.name if hasattr(acc, 'name') else acc['name']}:\nالحالة: {status}\n\nاختر الإجراء:"
+    await callback.message.edit_text(text, reply_markup=get_account_keyboard(acc_id))
+    await callback.answer()
 
-    if user_id not in USER_ACCOUNTS:
-        USER_ACCOUNTS[user_id] = {}
+@router.callback_query(F.data.startswith("balance_"))
+async def cb_get_balance(callback: CallbackQuery):
+    acc_id = callback.data.split("_")[1]
+    acc = ACCOUNTS[acc_id]
+    if not acc["init_data"]:
+        await callback.answer("لم يتم إدخال init_data لهذا الحساب بعد.", show_alert=True)
+        return
+    
+    await callback.answer("جاري جلب الرصيد...")
+    token, user_uuid, headers = authenticate_and_get_details(acc["init_data"])
+    if token and headers:
+        bal = get_balance(token, headers)
+        await callback.message.answer(f"رصيد {acc['name']} الحالي: {bal}")
+    else:
+        await callback.message.answer(f"فشل جلب الرصيد لـ {acc['name']}. تحقق من صلاحية init_data.")
 
-    acc_key = f"acc_{len(USER_ACCOUNTS[user_id]) + 1}"
-    USER_ACCOUNTS[user_id][acc_key] = {
-        "name": acc_name,
-        "init_data": init_data,
-        "active": False
-    }
+@router.callback_query(F.data.startswith("update_"))
+async def cb_update_single(callback: CallbackQuery, state: FSMContext):
+    acc_id = callback.data.split("_")[1]
+    await state.update_data(target_account=acc_id)
+    await state.set_state(Form.waiting_for_init_data)
+    await callback.message.answer(f"أرسل الآن قيم الـ init_data الخاصة بـ {ACCOUNTS[acc_id]['name']}:")
+    await callback.answer()
 
-    await update.message.reply_text(
-        f"✅ تم حفظ الحساب **{acc_name}** بنجاح!\nيمكنك الآن الضغط على أزرار التحكم أدناه.",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
+@router.callback_query(F.data == "set_init_data")
+async def cb_set_init_data(callback: CallbackQuery, state: FSMContext):
+    keyboard = []
+    for acc_id, acc_data in ACCOUNTS.items():
+        keyboard.append([InlineKeyboardButton(text=acc_data["name"], callback_data=f"target_{acc_id}")])
+    keyboard.append([InlineKeyboardButton(text="إلغاء", callback_data="main_menu")])
+    
+    await callback.message.edit_text("اختر الحساب الذي تريد تحديث بياناته:", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await callback.answer()
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("تم إلغاء العملية.", reply_markup=get_main_keyboard())
-    return ConversationHandler.END
+@router.callback_query(F.data.startswith("target_"))
+async def cb_target_account(callback: CallbackQuery, state: FSMContext):
+    acc_id = callback.data.split("_")[1]
+    await state.update_data(target_account=acc_id)
+    await state.set_state(Form.waiting_for_init_data)
+    await callback.message.answer(f"أرسل الآن قيم الـ init_data الخاصة بـ {ACCOUNTS[acc_id]['name']}:")
+    await callback.answer()
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
+@router.message(Form.waiting_for_init_data)
+async def process_init_data(message: Message, state: FSMContext):
+    data = await state.get_data()
+    acc_id = data.get("target_account")
+    init_data_val = message.text.strip()
+    
+    ACCOUNTS[acc_id]["init_data"] = init_data_val
+    await state.clear()
+    
+    token, user_uuid, headers = authenticate_and_get_details(init_data_val)
+    if token:
+        await message.answer(f"تم حفظ والتحقق من {ACCOUNTS[acc_id]['name']} بنجاح.", reply_markup=get_main_keyboard())
+    else:
+        await message.answer(f"تم الحفظ ولكن فشلت المصادقة. يجدر التأكد من صلاحية الرابط لـ {ACCOUNTS[acc_id]['name']}.", reply_markup=get_main_keyboard())
 
-    if query.data == "run_mining":
-        accounts = USER_ACCOUNTS.get(user_id, {})
-        if not accounts:
-            await query.message.reply_text("❌ لا توجد حسابات مسجلة! اضغط على 'إضافة حساب جديد' أولاً.")
-            return
+# خلفية تعدين الإعلانات لكل حساب
+async def mining_worker(bot: Bot, chat_id: int, acc_id: str):
+    acc = ACCOUNTS[acc_id]
+    token, user_uuid, headers = authenticate_and_get_details(acc["init_data"])
+    
+    if not token or not user_uuid:
+        await bot.send_message(chat_id, f"فشل بدء التعدين لـ {acc['name']} بسبب خطأ في المصادقة.")
+        acc["active"] = False
+        return
+
+    await bot.send_message(chat_id, f"بدأ تشغيل عمليات التعدين لـ {acc['name']}.")
+    
+    # حلقة التعدين المصغرة
+    while acc["active"]:
+        for ad_type in AD_TYPES:
+            if not acc["active"]:
+                break
+            payload = {"initData": acc["init_data"], "ad_type": ad_type}
+            if ad_type in ["gigapub", "taddy", "monetag", "sponsored"]:
+                payload["interacted"] = True
+                
+            try:
+                res = requests.post(AD_WATCH_URL, json=payload, headers=headers, timeout=15)
+                if res.status_code == 200:
+                    # نظام إشعارات احتساب العملات
+                    bal = get_balance(token, headers)
+                    await bot.send_message(
+                        chat_id, 
+                        f"إشعار تعدين:\nالحساب: {acc['name']}\nنوع الإعلان: {ad_type.upper()}\nالحالة: تمت الإضافة بنجاح\nالرصيد الحالي: {bal}"
+                    )
+                elif res.status_code in [401, 403]:
+                    await bot.send_message(chat_id, f"تنبيه: انتهت صلاحية التوكن أو الـ init_data لـ {acc['name']}. يرجى تحديثها.")
+                    acc["active"] = False
+                    break
+            except Exception as e:
+                logging.error(f"Mining error: {e}")
+            
+            await asyncio.sleep(15)
+        await asyncio.sleep(10)
+
+@router.callback_query(F.data.startswith("toggle_"))
+async def cb_toggle_mining(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    acc_id = callback.data.split("_")[1]
+    acc = ACCOUNTS[acc_id]
+    
+    if not acc["init_data"]:
+        await callback.answer("يجب إدخال init_data أولاً لهذا الحساب.", show_alert=True)
+        return
         
-        count = 0
-        for acc_key, acc_data in accounts.items():
-            if not acc_data["active"] and acc_data["init_data"]:
-                count += 1
-                asyncio.create_task(start_account_mining(user_id, acc_key, chat_id, context))
-        
-        await query.message.reply_text(f"🚀 تم بدء مهام التعدين لـ ({count}) حسابات مفعلة.")
+    if acc["active"]:
+        acc["active"] = False
+        await callback.message.edit_text(f"تم إيقاف التعدين لـ {acc['name']}.", reply_markup=get_account_keyboard(acc_id))
+    else:
+        acc["active"] = True
+        # تشغيل التعدين في مهمة خلفية (Background Task)
+        asyncio.create_task(mining_worker(bot, callback.message.chat.id, acc_id))
+        await callback.message.edit_text(f"تم بدء التعدين لـ {acc['name']}.", reply_markup=get_account_keyboard(acc_id))
+    await callback.answer()
 
-    elif query.data == "stop_mining":
-        accounts = USER_ACCOUNTS.get(user_id, {})
-        for acc_key, acc_data in accounts.items():
-            acc_data["active"] = False
-        await query.message.reply_text("🛑 تم إيقاف جميع الحسابات بنجاح.")
-
-    elif query.data == "list_accounts":
-        accounts = USER_ACCOUNTS.get(user_id, {})
-        if not accounts:
-            text = "❌ لا توجد حسابات مسجلة حتى الآن."
-        else:
-            text = "📋 **حساباتك المخزنة:**\n\n"
-            for k, v in accounts.items():
-                st = "🟢 يعمل" if v["active"] else "🔴 متوقف"
-                text += f"🔹 **{v['name']}** [{st}]\n"
-        await query.message.reply_text(text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-
-    elif query.data == "check_balances":
-        accounts = USER_ACCOUNTS.get(user_id, {})
-        if not accounts:
-            text = "❌ لا توجد حسابات مسجلة لفحص أرصدتها."
-            await query.message.reply_text(text)
-            return
-
-        await query.message.reply_text("🔄 جاري فحص الأرصدة الحالية لجميع الحسابات...")
-        balances_text = "💰 **أرصدة الحسابات المباشرة:**\n\n"
-        for k, v in accounts.items():
-            token, _ = await asyncio.to_thread(authenticate_and_get_details, v["init_data"])
-            if token:
-                bal = await asyncio.to_thread(get_balance, token)
-                balances_text += f"🔹 **{v['name']}**: `{bal}`\n"
-            else:
-                balances_text += f"🔹 **{v['name']}**: `فشل الاتصال (يحتاج تحديث Init Data)`\n"
-        
-        await query.message.reply_text(balances_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-
-# ==================== MAIN ====================
-def main():
-    while True:
-        try:
-            app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-            conv_handler = ConversationHandler(
-                entry_points=[CallbackQueryHandler(add_account_start, pattern="^add_account$")],
-                states={
-                    GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_name)],
-                    GET_INIT_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_init_data)],
-                },
-                fallbacks=[CommandHandler("cancel", cancel)],
-            )
-
-            app.add_handler(conv_handler)
-            app.add_handler(CommandHandler("start", start_command))
-            app.add_handler(CallbackQueryHandler(button_handler))
-
-            print("🤖 Bot is running successfully with multi-account naming and real balance notifications...")
-            app.run_polling(drop_pending_updates=True)
-        except Exception as e:
-            print(f"[!] Bot crashed with error: {e}. Restarting in 5 seconds...")
-            import time
-            time.sleep(5)
+async def main():
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("البوت يعمل الآن...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
-            
+    asyncio.run(main())
+    
