@@ -3,7 +3,7 @@ import asyncio
 import requests
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = "8742169602:AAGg8N1RkGMfwUgx1Dg9cSVz1qRqRaIO1NU"
@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN = "8742169602:AAGg8N1RkGMfwUgx1Dg9cSVz1qRqRaIO1NU"
 API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zcWFoZnJ5d3p4ZXd1d3ZhaXpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzNTQ3ODgsImV4cCI6MjA5OTkzMDc4OH0.xqLJB4nDxvK4m7O2VoObIlXwwxwzsWtSZDV0cIq-Q8E"
 
 USER_ACCOUNTS = {}
-GET_NAME, GET_INIT_DATA, GET_UPDATE_INIT = range(3)
+USER_STATES = {}  # لتتبع حالة المستخدم (إضافة اسم، إدخال init_data، أو تحديثه)
 
 SUCCESS_DELAY = 15
 AD_TYPES = ["usl_ad", "gigapub", "taddy", "monetag", "sponsored"]
@@ -211,7 +211,8 @@ def get_account_keyboard(acc_key, is_active):
     status_btn = "🛑 إيقاف" if is_active else "🟢 تشغيل"
     keyboard = [
         [InlineKeyboardButton(status_btn, callback_data=f"toggle_{acc_key}"),
-         InlineKeyboardButton("🔄 تحديث Init Data", callback_data=f"upinit_{acc_key}")]
+         InlineKeyboardButton("🔄 تحديث Init", callback_data=f"upinit_{acc_key}")],
+        [InlineKeyboardButton("🗑️ حذف الحساب", callback_data=f"del_{acc_key}")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -223,65 +224,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.callback_query:
         await update.callback_query.message.edit_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
-async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("✏️ أرسل الآن **اسم الحساب** الجديد:")
-    return GET_NAME
-
-async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['temp_name'] = update.message.text.strip()
-    await update.message.reply_text("🔑 أرسل الآن **`init_data`** الخاص بهذا الحساب:", parse_mode="Markdown")
-    return GET_INIT_DATA
-
-async def receive_init_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    init_data = update.message.text.strip()
-    acc_name = context.user_data.get('temp_name', 'حساب بدون اسم')
-
-    if user_id not in USER_ACCOUNTS:
-        USER_ACCOUNTS[user_id] = {}
-
-    acc_key = f"acc_{len(USER_ACCOUNTS[user_id]) + 1}"
-    USER_ACCOUNTS[user_id][acc_key] = {
-        "name": acc_name,
-        "init_data": init_data,
-        "active": False
-    }
-
-    await update.message.reply_text(
-        f"✅ تم حفظ الحساب **{acc_name}** بنجاح!",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
-
-# تحديث init_data لحساب معين
-async def update_init_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    acc_key = query.data.split("_")[1]
-    context.user_data['target_acc'] = acc_key
-    await query.message.reply_text("🔄 أرسل الـ `init_data` الجديد لهذا الحساب:", parse_mode="Markdown")
-    return GET_UPDATE_INIT
-
-async def receive_updated_init(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    acc_key = context.user_data.get('target_acc')
-    new_init = update.message.text.strip()
-
-    if user_id in USER_ACCOUNTS and acc_key in USER_ACCOUNTS[user_id]:
-        USER_ACCOUNTS[user_id][acc_key]["init_data"] = new_init
-        acc_name = USER_ACCOUNTS[user_id][acc_key]["name"]
-        await update.message.reply_text(f"✅ تم تحديث `init_data` للحساب **{acc_name}** بنجاح!", reply_markup=get_main_keyboard(), parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ حدث خطأ، يرجى المحاولة لاحقاً.", reply_markup=get_main_keyboard())
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("تم إلغاء العملية.", reply_markup=get_main_keyboard())
-    return ConversationHandler.END
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -289,7 +231,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     data = query.data
 
-    if data == "run_mining":
+    if data == "add_account":
+        USER_STATES[user_id] = {"step": "waiting_name"}
+        await query.message.reply_text("✏️ أرسل الآن **اسم الحساب** الجديد:")
+
+    elif data == "run_mining":
         accounts = USER_ACCOUNTS.get(user_id, {})
         if not accounts:
             await query.message.reply_text("❌ لا توجد حسابات مسجلة.")
@@ -331,6 +277,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 account["active"] = True
                 asyncio.create_task(start_account_mining(user_id, acc_key, chat_id, context))
 
+    elif data.startswith("upinit_"):
+        acc_key = data.split("_")[1]
+        USER_STATES[user_id] = {"step": "waiting_update_init", "target_acc": acc_key}
+        await query.message.reply_text("🔄 أرسل الـ `init_data` الجديد لهذا الحساب:", parse_mode="Markdown")
+
+    elif data.startswith("del_"):
+        acc_key = data.split("_")[1]
+        if user_id in USER_ACCOUNTS and acc_key in USER_ACCOUNTS[user_id]:
+            acc_name = USER_ACCOUNTS[user_id][acc_key]["name"]
+            USER_ACCOUNTS[user_id][acc_key]["active"] = False
+            del USER_ACCOUNTS[user_id][acc_key]
+            await query.message.reply_text(f"🗑️ تم حذف الحساب **{acc_name}** بنجاح!", parse_mode="Markdown")
+
     elif data == "check_balances":
         accounts = USER_ACCOUNTS.get(user_id, {})
         if not accounts:
@@ -349,30 +308,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.reply_text(balances_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if user_id not in USER_STATES:
+        return
+
+    state = USER_STATES[user_id]
+    step = state.get("step")
+
+    if step == "waiting_name":
+        state["temp_name"] = text
+        state["step"] = "waiting_init"
+        await update.message.reply_text("🔑 أرسل الآن **`init_data`** الخاص بهذا الحساب:", parse_mode="Markdown")
+
+    elif step == "waiting_init":
+        acc_name = state.get("temp_name", "حساب")
+        if user_id not in USER_ACCOUNTS:
+            USER_ACCOUNTS[user_id] = {}
+
+        acc_key = f"acc_{len(USER_ACCOUNTS[user_id]) + 1}_{int(asyncio.get_event_loop().time())}"
+        USER_ACCOUNTS[user_id][acc_key] = {
+            "name": acc_name,
+            "init_data": text,
+            "active": False
+        }
+        del USER_STATES[user_id]
+        await update.message.reply_text(f"✅ تم إضافة وحفظ الحساب **{acc_name}** بنجاح!", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+    elif step == "waiting_update_init":
+        acc_key = state.get("target_acc")
+        if user_id in USER_ACCOUNTS and acc_key in USER_ACCOUNTS[user_id]:
+            USER_ACCOUNTS[user_id][acc_key]["init_data"] = text
+            acc_name = USER_ACCOUNTS[user_id][acc_key]["name"]
+            del USER_STATES[user_id]
+            await update.message.reply_text(f"✅ تم تحديث `init_data` للحساب **{acc_name}** بنجاح!", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        else:
+            del USER_STATES[user_id]
+            await update.message.reply_text("❌ حدث خطأ، يرجى المحاولة لاحقاً.", reply_markup=get_main_keyboard())
+
 # ==================== MAIN ====================
 def main():
     while True:
         try:
             app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-            conv_handler = ConversationHandler(
-                entry_points=[
-                    CallbackQueryHandler(add_account_start, pattern="^add_account$"),
-                    CallbackQueryHandler(update_init_start, pattern="^upinit_")
-                ],
-                states={
-                    GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_name)],
-                    GET_INIT_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_init_data)],
-                    GET_UPDATE_INIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_updated_init)],
-                },
-                fallbacks=[CommandHandler("cancel", cancel)],
-            )
-
-            app.add_handler(conv_handler)
             app.add_handler(CommandHandler("start", start_command))
             app.add_handler(CallbackQueryHandler(button_handler))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-            print("Bot is running...")
+            print("Bot is running smoothly...")
             app.run_polling(drop_pending_updates=True)
         except Exception as e:
             print(f"Bot crashed: {e}. Restarting...")
@@ -381,4 +367,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
