@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN = "8742169602:AAGg8N1RkGMfwUgx1Dg9cSVz1qRqRaIO1NU"
 API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zcWFoZnJ5d3p4ZXd1d3ZhaXpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzNTQ3ODgsImV4cCI6MjA5OTkzMDc4OH0.xqLJB4nDxvK4m7O2VoObIlXwwxwzsWtSZDV0cIq-Q8E"
 
 USER_ACCOUNTS = {}
-USER_STATES = {}  # لتتبع حالة المستخدم (إضافة اسم، إدخال init_data، أو تحديثه)
+USER_STATES = {}
 
 SUCCESS_DELAY = 15
 AD_TYPES = ["usl_ad", "gigapub", "taddy", "monetag", "sponsored"]
@@ -38,7 +38,7 @@ def authenticate_and_get_details(init_data):
         "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
     }
     try:
-        res = requests.post(AUTH_URL, json={"initData": init_data, "check_only": False}, headers=headers, timeout=15)
+        res = requests.post(AUTH_URL, json={"initData": init_data, "check_only": False}, headers=headers, timeout=10)
         if res.status_code != 200:
             return None, None
             
@@ -51,7 +51,7 @@ def authenticate_and_get_details(init_data):
         token_payload = {"email": email, "password": password, "gotrue_meta_security": {}}
         token_headers = {**headers, "authorization": f"Bearer {API_KEY}", "x-supabase-api-version": "2024-01-01"}
         
-        res_token = requests.post(TOKEN_URL, json=token_payload, headers=token_headers, timeout=15)
+        res_token = requests.post(TOKEN_URL, json=token_payload, headers=token_headers, timeout=10)
         if res_token.status_code != 200:
             return None, None
             
@@ -94,7 +94,7 @@ def get_headers(token):
 
 def get_balance(token):
     try:
-        res = requests.post(BALANCE_URL, json={}, headers={**get_headers(token), "content-profile": "public"}, timeout=10)
+        res = requests.post(BALANCE_URL, json={}, headers={**get_headers(token), "content-profile": "public"}, timeout=8)
         if res.status_code == 200:
             return res.text
     except Exception as e:
@@ -103,26 +103,28 @@ def get_balance(token):
 
 def update_session(token, user_uuid):
     try:
-        requests.post(SESSION_URL, json={"p_user_id": user_uuid}, headers={**get_headers(token), "content-profile": "public"}, timeout=10)
+        requests.post(SESSION_URL, json={"p_user_id": user_uuid}, headers={**get_headers(token), "content-profile": "public"}, timeout=8)
     except:
         pass
 
 # ==================== WORKERS ====================
 async def worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user_id):
-    account = USER_ACCOUNTS.get(user_id, {}).get(acc_key)
-    if not account:
-        return
-
-    payload = {"initData": account["init_data"], "ad_type": ad_type}
+    payload = {"initData": "", "ad_type": ad_type}
     if ad_type in ["gigapub", "taddy", "monetag", "sponsored"]:
         payload["interacted"] = True
 
     session = requests.Session()
     session.headers.update(get_headers(token))
     
-    while account["active"]:
+    while True:
+        account = USER_ACCOUNTS.get(user_id, {}).get(acc_key)
+        if not account or not account["active"]:
+            break
+
+        payload["initData"] = account["init_data"]
+
         try:
-            res = await asyncio.to_thread(session.post, AD_WATCH_URL, json=payload, timeout=15)
+            res = await asyncio.to_thread(session.post, AD_WATCH_URL, json=payload, timeout=12)
             res_data = None
             try:
                 res_data = res.json()
@@ -130,7 +132,6 @@ async def worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user
                 pass
                 
             if res.status_code in [401, 403]:
-                logging.warning(f"Token expired for account {account['name']}")
                 await asyncio.sleep(60)
                 continue
                 
@@ -193,8 +194,8 @@ async def start_account_mining(user_id, acc_key, chat_id, context):
         parse_mode="Markdown"
     )
 
-    tasks = [asyncio.create_task(worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user_id)) for ad_type in AD_TYPES]
-    await asyncio.gather(*tasks)
+    for ad_type in AD_TYPES:
+        asyncio.create_task(worker_task(acc_key, ad_type, token, user_uuid, chat_id, context, user_id))
 
 # ==================== KEYBOARDS ====================
 def get_main_keyboard():
@@ -274,13 +275,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 account["active"] = False
                 await query.message.reply_text(f"🛑 تم إيقاف الحساب: {account['name']}")
             else:
-                account["active"] = True
                 asyncio.create_task(start_account_mining(user_id, acc_key, chat_id, context))
 
     elif data.startswith("upinit_"):
         acc_key = data.split("_")[1]
         USER_STATES[user_id] = {"step": "waiting_update_init", "target_acc": acc_key}
-        await query.message.reply_text("🔄 أرسل الـ `init_data` الجديد لهذا الحساب:", parse_mode="Markdown")
+        await query.message.reply_text("🔄 أرسل الـ `init_data` الجديد لهذا الحساب الآن:", parse_mode="Markdown")
 
     elif data.startswith("del_"):
         acc_key = data.split("_")[1]
@@ -310,11 +310,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip()
-    
     if user_id not in USER_STATES:
         return
 
+    text = update.message.text.strip()
     state = USER_STATES[user_id]
     step = state.get("step")
 
@@ -358,7 +357,7 @@ def main():
             app.add_handler(CallbackQueryHandler(button_handler))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-            print("Bot is running smoothly...")
+            print("Bot is running fast and smooth...")
             app.run_polling(drop_pending_updates=True)
         except Exception as e:
             print(f"Bot crashed: {e}. Restarting...")
@@ -367,3 +366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
